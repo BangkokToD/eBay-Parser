@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -9,7 +10,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TELEGRAM_TOKEN, ACCESS_KEY, AUTHORIZED_USERS_FILE, LINKS_FILE
-from browser_manager import monitor_links
+from browser_manager import monitor_links, resume_proxy_limited_monitoring
+from telegram_utils import close_notify_bot_session
 
 bot = Bot(
     token=TELEGRAM_TOKEN,
@@ -44,7 +46,8 @@ def menu_kb():
     kb.button(text="🗑️ Удалить", callback_data="remove")
     kb.button(text="📋 Список", callback_data="list")
     kb.button(text="🧹 Очистить всё", callback_data="clean")
-    kb.adjust(2, 2)  # две кнопки в ряд
+    kb.button(text="▶️ Старт", callback_data="start_monitoring")
+    kb.adjust(2, 2, 1)  # две кнопки в ряд и отдельная кнопка запуска
     return kb.as_markup()
 
 @dp.message(F.text == "/start")
@@ -80,14 +83,27 @@ async def process_url(message: types.Message, state: FSMContext):
     data = await state.get_data()
     name = data["name"]
     url = message.text.strip()
+
     try:
         with open(LINKS_FILE, "r", encoding="utf-8") as f:
             links = json.load(f)
     except:
         links = []
+
+    if any(item.get("url") == url for item in links):
+        await message.answer(
+            "⚠️ Такая ссылка уже есть в списке.",
+            reply_markup=menu_kb(),
+        )
+        await state.clear()
+        return
+
+
     links.append({"name": name, "url": url})
+
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         json.dump(links, f, indent=2)
+        
     await message.answer(f"✅ Добавлено: <a href=\"{url}\">{name}</a>", reply_markup=menu_kb())
     await state.clear()
 
@@ -132,10 +148,30 @@ async def callback_clean(callback: types.CallbackQuery):
 async def callback_menu(callback: types.CallbackQuery):
     await callback.message.edit_text("📋 Главное меню", reply_markup=menu_kb())
 
+@dp.callback_query(F.data == "start_monitoring")
+async def callback_start_monitoring(callback: types.CallbackQuery):
+    restarted = await resume_proxy_limited_monitoring()
+
+    if restarted:
+        await callback.message.edit_text(
+            "▶️ Поиск запущен. Если прокси пополнены, мониторинг продолжится автоматически.",
+            reply_markup=menu_kb(),
+        )
+    else:
+        await callback.message.edit_text("✅ Поиск уже активен.", reply_markup=menu_kb())
+
 # Старт
 async def main():
-    asyncio.create_task(monitor_links())
-    await dp.start_polling(bot)
+    monitor_task = asyncio.create_task(monitor_links())
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        monitor_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor_task
+        await close_notify_bot_session()
+        await bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

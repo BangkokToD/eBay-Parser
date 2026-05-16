@@ -2,15 +2,73 @@ import os
 import json
 import hashlib
 import random
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pathlib import Path
 from config import (
     LINKS_FILE, KNOWN_ITEMS_FILE,
     AUTHORIZED_USERS_FILE,
-    REFERERS, ACCEPT_LANGUAGES, USE_PROXIES
+    REFERERS, ACCEPT_LANGUAGES, USE_PROXIES,
+    PROXIES_FILE, KNOWN_ITEMS_TTL_DAYS
 )
 
-PROXIES_FILE = "proxies.json"
+
+def get_utc_now_iso() -> str:
+    """Возвращает текущее UTC-время в формате ISO 8601.
+
+    Returns:
+        Строка времени с суффиксом ``Z``.
+    """
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_utc_iso(value: str | None) -> datetime | None:
+    """Преобразует ISO-строку в UTC datetime.
+
+    Args:
+        value: Значение из JSON или ``None``.
+
+    Returns:
+        Объект ``datetime`` в UTC или ``None``, если строку нельзя разобрать.
+    """
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def normalize_known_item_meta(meta: object, now_iso: str) -> dict[str, str]:
+    """Нормализует метаданные сохранённого товара.
+
+    Args:
+        meta: Старое или новое значение из ``known_items.json``.
+        now_iso: Текущее время для заполнения отсутствующих полей.
+
+    Returns:
+        Словарь с ``first_seen_at`` и ``last_seen_at``.
+    """
+    if not isinstance(meta, dict):
+        return {
+            "first_seen_at": now_iso,
+            "last_seen_at": now_iso,
+        }
+
+    first_seen_at = meta.get("first_seen_at") or now_iso
+    last_seen_at = meta.get("last_seen_at") or first_seen_at
+
+    return {
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+    }
+
 
 def normalize_url(url: str) -> str:
     try:
@@ -80,18 +138,140 @@ def get_file_hash(path):
     except:
         return ""
 
-def load_known_items():
+def load_known_items() -> dict[str, dict[str, str]]:
+    """Загружает известные товары с обратной совместимостью.
+
+    Поддерживает старый формат ``list[str]`` и новый формат
+    ``dict[str, {"first_seen_at": str, "last_seen_at": str}]``.
+
+    Returns:
+        Словарь ссылок с датами первого и последнего обнаружения.
+    """
     if not Path(KNOWN_ITEMS_FILE).exists():
-        return set()
+        return {}
+
     with open(KNOWN_ITEMS_FILE, "r", encoding="utf-8") as f:
         try:
-            return set(json.load(f))
-        except:
-            return set()
+            raw_items = json.load(f)
+        except Exception:
+            return {}
+
+    now_iso = get_utc_now_iso()
+
+    if isinstance(raw_items, list):
+        return {
+            normalize_url(item): normalize_known_item_meta(None, now_iso)
+            for item in raw_items
+            if isinstance(item, str) and item.strip()
+        }
+
+    if not isinstance(raw_items, dict):
+        return {}
+
+    normalized_items = {}
+    for url, meta in raw_items.items():
+        if not isinstance(url, str) or not url.strip():
+            continue
+        normalized_items[normalize_url(url)] = normalize_known_item_meta(meta, now_iso)
+
+    return normalized_items
 
 def save_known_items(items):
+    """Сохраняет известные товары в новом формате с метаданными.
+
+    Args:
+        items: Словарь нового формата. Для страховки также принимает старые
+            коллекции ссылок и конвертирует их при сохранении.
+    """
+    now_iso = get_utc_now_iso()
+
+    if isinstance(items, dict):
+        normalized_items = {
+            normalize_url(url): normalize_known_item_meta(meta, now_iso)
+            for url, meta in items.items()
+            if isinstance(url, str) and url.strip()
+        }
+    else:
+        normalized_items = {
+            normalize_url(url): normalize_known_item_meta(None, now_iso)
+            for url in items
+            if isinstance(url, str) and url.strip()
+        }
+
     with open(KNOWN_ITEMS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(items)), f, ensure_ascii=False, indent=2)
+        json.dump(normalized_items, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+def update_known_items_seen(
+    known_items: dict[str, dict[str, str]],
+    links: set[str],
+) -> set[str]:
+    """Обновляет даты обнаружения и возвращает только новые ссылки.
+
+    Args:
+        known_items: Загруженный словарь известных товаров.
+        links: Ссылки, найденные во время текущей проверки.
+
+    Returns:
+        Множество ссылок, которых раньше не было в ``known_items``.
+    """
+    now_iso = get_utc_now_iso()
+    new_links = set()
+
+    for link in links:
+        normalized_link = normalize_url(link)
+        if not normalized_link:
+            continue
+
+        current_meta = known_items.get(normalized_link)
+        if current_meta is None:
+            known_items[normalized_link] = {
+                "first_seen_at": now_iso,
+                "last_seen_at": now_iso,
+            }
+            new_links.add(normalized_link)
+            continue
+
+        normalized_meta = normalize_known_item_meta(current_meta, now_iso)
+        normalized_meta["last_seen_at"] = now_iso
+        known_items[normalized_link] = normalized_meta
+
+    return new_links
+
+def prune_known_items(
+    known_items: dict[str, dict[str, str]],
+    ttl_days: int = KNOWN_ITEMS_TTL_DAYS,
+) -> int:
+    """Удаляет товары, которые давно не встречались на странице.
+
+    Args:
+        known_items: Загруженный словарь известных товаров.
+        ttl_days: Количество дней без повторного обнаружения до удаления.
+
+    Returns:
+        Количество удалённых записей.
+    """
+    if ttl_days <= 0:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days)
+    urls_to_delete = []
+
+    for url, meta in known_items.items():
+        normalized_meta = normalize_known_item_meta(meta, get_utc_now_iso())
+        last_seen_at = parse_utc_iso(normalized_meta.get("last_seen_at"))
+
+        # Некорректные даты не удаляем автоматически, чтобы не потерять данные
+        # из-за ручной правки JSON.
+        if last_seen_at is None:
+            continue
+
+        if last_seen_at < cutoff:
+            urls_to_delete.append(url)
+
+    for url in urls_to_delete:
+        known_items.pop(url, None)
+
+    return len(urls_to_delete)
 
 def load_authorized_users():
     try:
@@ -100,15 +280,20 @@ def load_authorized_users():
     except:
         return []
 
-def get_random_headers():
-    headers = {
-        "user_agent": generate_user_agent(),
+def get_random_headers() -> dict:
+    """Возвращает HTTP-заголовки для браузерного контекста.
+
+    Не подменяет User-Agent, потому что случайный User-Agent может не совпадать
+    с реальным Chromium/Chrome и ухудшать браузерный отпечаток.
+
+    Returns:
+        Опции заголовков для Playwright ``new_context``.
+    """
+    return {
         "extra_http_headers": {
-            "Referer": random.choice(REFERERS),
-            "Accept-Language": random.choice(ACCEPT_LANGUAGES)
+            "Accept-Language": "en-US,en;q=0.9",
         }
     }
-    return headers
 
 def generate_user_agent():
     chrome_build = f"{random.randint(100, 120)}.0.{random.randint(1000, 9999)}.{random.randint(10, 999)}"
@@ -118,14 +303,42 @@ def generate_user_agent():
         f"Chrome/{chrome_build} Safari/537.36"
     )
 
+
+def is_ebay_item_url(url: str) -> bool:
+    """Проверяет, является ли ссылка карточкой товара eBay.
+
+    Args:
+        url: Ссылка для проверки.
+
+    Returns:
+        ``True``, если ссылка ведёт на товар ``/itm/``.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    return "ebay.com" in parsed.netloc and "/itm/" in parsed.path
+
+
 async def extract_links(page, selector, limit=None):
     try:
         elements = await page.query_selector_all(f"{selector} a")
-        if limit:
-            elements = elements[:limit]
 
         raw_links = [await el.get_attribute("href") for el in elements if await el.get_attribute("href")]
-        normalized = set([normalize_url(link) for link in raw_links if link])
+        normalized = []
+
+        for link in raw_links:
+            if not link:
+                continue
+            normalized_link = normalize_url(link)
+            if is_ebay_item_url(normalized_link):
+                normalized.append(normalized_link)
+
+        if limit:
+            normalized = normalized[:limit]
+
+        normalized = set(normalized)
         return normalized
     except Exception as e:
         print("[ERROR] extract_links:", e)

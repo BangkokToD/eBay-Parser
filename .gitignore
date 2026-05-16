@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Runtime state
+authorized.json
+links.json
+known_items.json
+proxies.json
+iproyal_list.txt
+
+# Debug/runtime artifacts
+debug_screenshots/
+*.log
+logs/
+tmp/
+temp/
+
+# Playwright
+playwright-report/
+test-results/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

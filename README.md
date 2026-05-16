@@ -25,7 +25,7 @@
 ---
 ## ⚙️ Быстрый старт
 ### 1. Установка Python
-Убедитесь, что установлен Python 3.9+ и pip:
+Убедитесь, что установлен Python 3.10+ и pip:
 ```
 python3 --version
 pip install --upgrade pip

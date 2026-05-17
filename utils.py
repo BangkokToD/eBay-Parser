@@ -107,6 +107,106 @@ def check_if_link_parsed(name, links_file=LINKS_FILE):
             return link.get("parsed", False)
     return False
 
+
+def parse_proxy_line(line: str, line_number: int) -> tuple[dict | None, str | None]:
+    """Разбирает одну строку прокси в формат Playwright.
+
+    Args:
+        line: Строка прокси из Telegram.
+        line_number: Номер строки в исходном сообщении.
+
+    Returns:
+        Кортеж ``(proxy, error)``. Если строка валидна, ``error`` равен ``None``.
+    """
+    stripped_line = line.strip()
+    if not stripped_line:
+        return None, None
+
+    if stripped_line.startswith("http://"):
+        stripped_line = stripped_line.removeprefix("http://")
+    elif stripped_line.startswith("https://"):
+        stripped_line = stripped_line.removeprefix("https://")
+
+    parts = stripped_line.split(":", 3)
+    if len(parts) != 4:
+        return None, (
+            f"строка {line_number}: ожидается формат host:port:username:password"
+        )
+
+    host, port_raw, username, password = [part.strip() for part in parts]
+
+    if not host:
+        return None, f"строка {line_number}: host не может быть пустым"
+
+    if "/" in host or " " in host:
+        return None, f"строка {line_number}: host содержит недопустимые символы"
+
+    if not port_raw.isdigit():
+        return None, f"строка {line_number}: port должен быть числом"
+
+    port = int(port_raw)
+    if port < 1 or port > 65535:
+        return None, f"строка {line_number}: port должен быть от 1 до 65535"
+
+    if not username:
+        return None, f"строка {line_number}: username не может быть пустым"
+
+    if not password:
+        return None, f"строка {line_number}: password не может быть пустым"
+
+    return {
+        "server": f"http://{host}:{port}",
+        "username": username,
+        "password": password,
+    }, None
+
+
+def parse_proxy_list_text(text: str) -> tuple[list[dict], list[str]]:
+    """Разбирает многострочный список прокси.
+
+    Пустые строки игнорируются. Если после удаления пустых строк список пустой,
+    возвращается ошибка, чтобы случайно не очистить рабочий ``proxies.json``.
+
+    Args:
+        text: Многострочный текст от пользователя.
+
+    Returns:
+        Кортеж ``(proxies, errors)``.
+    """
+    proxies = []
+    errors = []
+
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        proxy, error = parse_proxy_line(line, line_number)
+        if error:
+            errors.append(error)
+            continue
+
+        if proxy:
+            proxies.append(proxy)
+
+    if not proxies and not errors:
+        errors.append("список прокси пустой")
+
+    return proxies, errors
+
+
+def save_proxies_atomic(proxies: list[dict]) -> None:
+    """Атомарно сохраняет список прокси в ``PROXIES_FILE``.
+
+    Args:
+        proxies: Валидированный список прокси в формате Playwright.
+    """
+    target_path = Path(PROXIES_FILE)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_path.with_name(f".{target_path.name}.tmp")
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(proxies, f, ensure_ascii=False, indent=2)
+
+    os.replace(tmp_path, target_path)
+
+
 def load_proxies():
     try:
         with open(PROXIES_FILE, "r", encoding="utf-8") as f:

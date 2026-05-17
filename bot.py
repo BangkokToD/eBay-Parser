@@ -6,17 +6,19 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TELEGRAM_TOKEN, ACCESS_KEY, AUTHORIZED_USERS_FILE, LINKS_FILE
 from browser_manager import (
     is_monitoring_enabled,
     monitor_links,
+    restart_monitoring_with_new_proxies,
     start_monitoring,
     stop_monitoring,
 )
 from telegram_utils import close_notify_bot_session
+from utils import parse_proxy_list_text, save_proxies_atomic
 
 bot = Bot(
     token=TELEGRAM_TOKEN,
@@ -24,10 +26,19 @@ bot = Bot(
 )
 dp = Dispatcher()
 
+START_MONITORING_BUTTON_TEXT = "▶️ Старт"
+STOP_MONITORING_BUTTON_TEXT = "⏹️ Стоп"
+MAIN_MENU_BUTTON_TEXT = "📋 Главное меню"
+
 # FSM
 class AddLink(StatesGroup):
     name = State()
     url = State()
+
+
+class ChangeProxies(StatesGroup):
+    waiting_for_list = State()
+
 
 # Авторизация
 def load_users():
@@ -45,26 +56,56 @@ def is_authorized(user_id):
     return user_id in load_users()
 
 # Кнопки
+def main_reply_kb() -> ReplyKeyboardMarkup:
+    """Создаёт постоянную нижнюю клавиатуру быстрого доступа.
+
+    Returns:
+        Telegram reply-клавиатура с быстрым включением/выключением поиска и
+        возвратом в главное меню.
+    """
+    monitoring_button_text = (
+        STOP_MONITORING_BUTTON_TEXT
+        if is_monitoring_enabled()
+        else START_MONITORING_BUTTON_TEXT
+    )
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=monitoring_button_text)],
+            [KeyboardButton(text=MAIN_MENU_BUTTON_TEXT)],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def menu_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить", callback_data="add")
     kb.button(text="🗑️ Удалить", callback_data="remove")
     kb.button(text="📋 Список", callback_data="list")
     kb.button(text="🧹 Очистить всё", callback_data="clean")
+    kb.button(text="🔁 Изменить список прокси", callback_data="change_proxies")
 
     if is_monitoring_enabled():
         kb.button(text="⏹️ Стоп", callback_data="stop_monitoring")
     else:
         kb.button(text="▶️ Старт", callback_data="start_monitoring")
 
-    kb.adjust(2, 2, 1)  # две кнопки в ряд и отдельная кнопка запуска/остановки
+    kb.adjust(2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def cancel_proxy_change_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отмена", callback_data="cancel_change_proxies")
     return kb.as_markup()
 
 @dp.message(F.text == "/start")
 async def start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     if is_authorized(user_id):
-        await message.answer("👋 Добро пожаловать!", reply_markup=menu_kb())
+        await message.answer("👋 Добро пожаловать!", reply_markup=main_reply_kb())
+        await message.answer("📋 Главное меню", reply_markup=menu_kb())
     else:
         await message.answer("🔐 Введите ключ доступа:")
 
@@ -75,12 +116,59 @@ async def auth_key(message: types.Message):
     if user_id not in users:
         users.append(user_id)
         save_users(users)
-    await message.answer("✅ Успешная авторизация!", reply_markup=menu_kb())
+    await message.answer("✅ Успешная авторизация!", reply_markup=main_reply_kb())
+    await message.answer("📋 Главное меню", reply_markup=menu_kb())
 
 @dp.callback_query(F.data == "add")
 async def callback_add(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🔤 Введите название ссылки:")
     await state.set_state(AddLink.name)
+
+
+@dp.message(F.text == MAIN_MENU_BUTTON_TEXT)
+async def reply_main_menu(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not is_authorized(user_id):
+        await message.answer("🔐 Введите ключ доступа:")
+        return
+
+    await state.clear()
+    await message.answer("📋 Главное меню", reply_markup=menu_kb())
+
+
+@dp.message(
+    (F.text == START_MONITORING_BUTTON_TEXT)
+    | (F.text == STOP_MONITORING_BUTTON_TEXT)
+)
+async def reply_toggle_monitoring(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not is_authorized(user_id):
+        await message.answer("🔐 Введите ключ доступа:")
+        return
+
+    await state.clear()
+
+    if is_monitoring_enabled():
+        stopped = await stop_monitoring(reason="ручная остановка из reply-клавиатуры")
+
+        if stopped:
+            await message.answer("⏹️ Поиск остановлен.", reply_markup=main_reply_kb())
+            await message.answer("📋 Главное меню", reply_markup=menu_kb())
+        else:
+            await message.answer("✅ Поиск уже остановлен.", reply_markup=main_reply_kb())
+            await message.answer("📋 Главное меню", reply_markup=menu_kb())
+
+        return
+
+    started = await start_monitoring()
+
+    if started:
+        await message.answer("▶️ Поиск запущен.", reply_markup=main_reply_kb())
+        await message.answer("📋 Главное меню", reply_markup=menu_kb())
+    else:
+        await message.answer("✅ Поиск уже активен.", reply_markup=main_reply_kb())
+        await message.answer("📋 Главное меню", reply_markup=menu_kb())
+
 
 @dp.message(AddLink.name)
 async def process_name(message: types.Message, state: FSMContext):
@@ -116,6 +204,72 @@ async def process_url(message: types.Message, state: FSMContext):
         
     await message.answer(f"✅ Добавлено: <a href=\"{url}\">{name}</a>", reply_markup=menu_kb())
     await state.clear()
+
+
+@dp.callback_query(F.data == "change_proxies")
+async def callback_change_proxies(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Пришлите новый список прокси.\n\n"
+        "Формат каждой строки:\n"
+        "<code>geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSIONID_lifetime-30m</code>\n\n"
+        "Старый список будет полностью заменён только если все строки валидны.",
+        reply_markup=cancel_proxy_change_kb(),
+    )
+    await state.set_state(ChangeProxies.waiting_for_list)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel_change_proxies")
+async def callback_cancel_change_proxies(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("📋 Главное меню", reply_markup=menu_kb())
+    await callback.answer()
+
+
+@dp.message(ChangeProxies.waiting_for_list)
+async def process_proxy_list(message: types.Message, state: FSMContext):
+    proxies, errors = parse_proxy_list_text(message.text or "")
+
+    if errors:
+        error_text = "\n".join(f"• {error}" for error in errors[:20])
+        extra_errors_count = max(0, len(errors) - 20)
+        if extra_errors_count:
+            error_text += f"\n• ...и ещё ошибок: {extra_errors_count}"
+
+        await message.answer(
+            "❌ Список прокси не заменён. Исправьте ошибки и пришлите список заново.\n\n"
+            f"{error_text}",
+            reply_markup=cancel_proxy_change_kb(),
+        )
+        return
+
+    try:
+        save_proxies_atomic(proxies)
+    except Exception as exc:
+        await message.answer(
+            "❌ Не удалось сохранить новый список прокси. "
+            f"Старый список не изменён. Ошибка: {exc}",
+            reply_markup=cancel_proxy_change_kb(),
+        )
+        return
+
+    was_monitoring_enabled = is_monitoring_enabled()
+
+    if was_monitoring_enabled:
+        await restart_monitoring_with_new_proxies()
+        result_text = (
+            f"✅ Список прокси заменён. Сохранено: {len(proxies)}.\n"
+            "Активные браузеры перезапускаются с новыми прокси."
+        )
+    else:
+        result_text = (
+            f"✅ Список прокси заменён. Сохранено: {len(proxies)}.\n"
+            "Поиск сейчас остановлен. Чтобы запустить — нажмите «Старт»."
+        )
+
+    await state.clear()
+    await message.answer(result_text, reply_markup=menu_kb())
+
 
 @dp.callback_query(F.data == "list")
 async def callback_list(callback: types.CallbackQuery):

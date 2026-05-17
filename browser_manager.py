@@ -335,6 +335,21 @@ async def stop_monitoring(reason: str | None = None) -> bool:
     return was_active
 
 
+async def restart_monitoring_with_new_proxies() -> None:
+    """Перезапускает активные сессии после замены списка прокси.
+
+    Если мониторинг сейчас выключен, функция ничего не делает. Если мониторинг
+    включён, текущие браузерные задачи закрываются, а controller-loop создаёт
+    новые задачи на следующем цикле уже с обновлённым ``proxies.json``.
+    """
+    if not monitor_enabled_event.is_set():
+        return
+
+    proxy_limit_stop_event.clear()
+    monitor_restart_requested.set()
+    await cancel_active_sessions(reason="замена списка прокси")
+
+
 async def stop_monitoring_due_to_proxy_limit(reason: str) -> None:
     """Останавливает браузерный мониторинг из-за проблемы с прокси.
 

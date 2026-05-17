@@ -10,7 +10,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TELEGRAM_TOKEN, ACCESS_KEY, AUTHORIZED_USERS_FILE, LINKS_FILE
-from browser_manager import monitor_links, resume_proxy_limited_monitoring
+from browser_manager import (
+    is_monitoring_enabled,
+    monitor_links,
+    start_monitoring,
+    stop_monitoring,
+)
 from telegram_utils import close_notify_bot_session
 
 bot = Bot(
@@ -46,8 +51,13 @@ def menu_kb():
     kb.button(text="🗑️ Удалить", callback_data="remove")
     kb.button(text="📋 Список", callback_data="list")
     kb.button(text="🧹 Очистить всё", callback_data="clean")
-    kb.button(text="▶️ Старт", callback_data="start_monitoring")
-    kb.adjust(2, 2, 1)  # две кнопки в ряд и отдельная кнопка запуска
+
+    if is_monitoring_enabled():
+        kb.button(text="⏹️ Стоп", callback_data="stop_monitoring")
+    else:
+        kb.button(text="▶️ Старт", callback_data="start_monitoring")
+
+    kb.adjust(2, 2, 1)  # две кнопки в ряд и отдельная кнопка запуска/остановки
     return kb.as_markup()
 
 @dp.message(F.text == "/start")
@@ -150,15 +160,26 @@ async def callback_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "start_monitoring")
 async def callback_start_monitoring(callback: types.CallbackQuery):
-    restarted = await resume_proxy_limited_monitoring()
+    started = await start_monitoring()
 
-    if restarted:
-        await callback.message.edit_text(
-            "▶️ Поиск запущен. Если прокси пополнены, мониторинг продолжится автоматически.",
-            reply_markup=menu_kb(),
-        )
+    if started:
+        await callback.message.edit_text("▶️ Поиск запущен.", reply_markup=menu_kb())
     else:
         await callback.message.edit_text("✅ Поиск уже активен.", reply_markup=menu_kb())
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "stop_monitoring")
+async def callback_stop_monitoring(callback: types.CallbackQuery):
+    stopped = await stop_monitoring(reason="ручная остановка из Telegram")
+
+    if stopped:
+        await callback.message.edit_text("⏹️ Поиск остановлен.", reply_markup=menu_kb())
+    else:
+        await callback.message.edit_text("✅ Поиск уже остановлен.", reply_markup=menu_kb())
+
+    await callback.answer()
 
 # Старт
 async def main():

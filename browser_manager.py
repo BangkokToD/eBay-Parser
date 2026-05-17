@@ -55,6 +55,7 @@ active_sessions = {}
 known_items = load_known_items()
 known_items_lock = asyncio.Lock()
 last_known_items_cleanup_ts = 0.0
+monitor_enabled_event = asyncio.Event()
 proxy_limit_stop_event = asyncio.Event()
 monitor_restart_requested = asyncio.Event()
 proxy_limit_reason = ""
@@ -276,6 +277,64 @@ async def handle_container_not_found(page, name: str, reason: str) -> None:
     await asyncio.sleep(sleep_seconds)
 
 
+def is_monitoring_enabled() -> bool:
+    """Проверяет, включён ли мониторинг пользователем.
+
+    Returns:
+        ``True``, если мониторинг разрешён и controller-loop может запускать
+        браузерные задачи.
+    """
+    return monitor_enabled_event.is_set()
+
+
+async def start_monitoring() -> bool:
+    """Включает ручной мониторинг ссылок.
+
+    Returns:
+        ``True``, если мониторинг был выключен и теперь включён.
+        ``False``, если мониторинг уже был активен.
+    """
+    global proxy_limit_reason
+
+    was_proxy_limited = proxy_limit_stop_event.is_set()
+
+    if monitor_enabled_event.is_set() and not was_proxy_limited:
+        return False
+
+    proxy_limit_reason = ""
+    proxy_limit_stop_event.clear()
+    monitor_enabled_event.set()
+    monitor_restart_requested.set()
+
+    if was_proxy_limited:
+        await notify_users_all("▶️ Поиск снова запущен.")
+
+    return True
+
+
+async def stop_monitoring(reason: str | None = None) -> bool:
+    """Останавливает ручной мониторинг и закрывает активные сессии.
+
+    Args:
+        reason: Причина остановки для логов.
+
+    Returns:
+        ``True``, если мониторинг был активен или были активные задачи.
+    """
+    global proxy_limit_reason
+
+    was_active = monitor_enabled_event.is_set() or bool(active_sessions)
+
+    monitor_enabled_event.clear()
+    monitor_restart_requested.clear()
+    proxy_limit_stop_event.clear()
+    proxy_limit_reason = ""
+
+    await cancel_active_sessions(reason=reason or "ручная остановка")
+
+    return was_active
+
+
 async def stop_monitoring_due_to_proxy_limit(reason: str) -> None:
     """Останавливает браузерный мониторинг из-за проблемы с прокси.
 
@@ -289,6 +348,8 @@ async def stop_monitoring_due_to_proxy_limit(reason: str) -> None:
 
     proxy_limit_reason = reason
     proxy_limit_stop_event.set()
+    monitor_enabled_event.clear()
+    monitor_restart_requested.clear()
 
     print(f"[CRITICAL] Поиск остановлен из-за прокси: {reason}")
     await notify_users_all(
@@ -306,25 +367,19 @@ async def resume_proxy_limited_monitoring() -> bool:
         ``True``, если мониторинг был остановлен и теперь возобновлён.
         ``False``, если мониторинг уже был активен.
     """
-    global proxy_limit_reason
+    return await start_monitoring()
 
-    if not proxy_limit_stop_event.is_set():
-        return False
-
-    proxy_limit_reason = ""
-    proxy_limit_stop_event.clear()
-    monitor_restart_requested.set()
-
-    await notify_users_all("▶️ Поиск снова запущен.")
-    return True
+async def cancel_active_sessions(reason: str = "остановка мониторинга") -> None:
+    """Отменяет все активные задачи мониторинга ссылок.
 
 
-async def cancel_active_sessions() -> None:
-    """Отменяет все активные задачи мониторинга ссылок."""
+    Args:
+        reason: Причина остановки для логов.
+    """
     tasks = []
 
     for url, task in list(active_sessions.items()):
-        print(f"[INFO] Останавливаем мониторинг из-за прокси-лимита: {url}")
+        print(f"[INFO] Останавливаем мониторинг ({reason}): {url}")
         task.cancel()
         tasks.append(task)
 
@@ -527,7 +582,7 @@ async def monitor_page(name, url):
     first_run = not check_if_link_parsed(name)
 
     while True:
-        if proxy_limit_stop_event.is_set():
+        if proxy_limit_stop_event.is_set() or not monitor_enabled_event.is_set():
             print(f"[INFO] ({name}) Поиск остановлен до ручного запуска")
             return
 
@@ -600,7 +655,7 @@ async def monitor_page(name, url):
                 # 🔁 Повторная проверка
                 while True:
                     try:
-                        if proxy_limit_stop_event.is_set():
+                        if proxy_limit_stop_event.is_set() or not monitor_enabled_event.is_set():
                             print(f"[INFO] ({name}) Поиск остановлен до ручного запуска")
                             return
 
@@ -650,14 +705,23 @@ async def monitor_links():
     while True:
         try:
             if proxy_limit_stop_event.is_set():
-                await cancel_active_sessions()
+                monitor_enabled_event.clear()
+                await cancel_active_sessions(reason="прокси-лимит")
+                prev_hash = ""
                 await asyncio.sleep(PROXY_LIMIT_STOP_POLL_SECONDS)
                 continue
 
+            if not monitor_enabled_event.is_set():
+                await cancel_active_sessions(reason="мониторинг выключен")
+                prev_hash = ""
+                await asyncio.sleep(3)
+                continue
+
             if monitor_restart_requested.is_set():
-                print("[INFO] Ручной запуск мониторинга после остановки")
+                print("[INFO] Перезапуск мониторинга")
                 monitor_restart_requested.clear()
                 prev_hash = ""
+                await cancel_active_sessions(reason="перезапуск мониторинга")
 
             links_hash = get_file_hash(LINKS_FILE)
             if links_hash != prev_hash:

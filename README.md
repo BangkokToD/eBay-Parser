@@ -2,9 +2,11 @@
 
 Telegram-бот для мониторинга новых товаров на eBay по сохранённым поисковым ссылкам.
 
-Бот управляется через Telegram: пользователь авторизуется по ключу, добавляет ссылки, удаляет ссылки, очищает список и получает уведомления о новых товарах.
+Бот управляется через Telegram: пользователь авторизуется по ключу, добавляет ссылки, удаляет ссылки, очищает список, меняет список прокси, вручную запускает или останавливает мониторинг и получает уведомления о новых товарах.
 
 Парсинг выполняется через Playwright и Chromium. Для каждой активной ссылки создаётся отдельная задача мониторинга и отдельный браузерный запуск.
+
+После запуска процесса `bot.py` мониторинг не стартует автоматически. Бот запускает Telegram-интерфейс, а поиск включается вручную кнопкой `▶️ Старт`.
 
 ## Возможности
 
@@ -13,15 +15,21 @@ Telegram-бот для мониторинга новых товаров на eBa
 * Удаление отдельных ссылок.
 * Очистка списка ссылок.
 * Просмотр списка отслеживаемых ссылок.
+* Ручной запуск и остановка мониторинга через `▶️ Старт` / `⏹️ Стоп`.
+* Дублирующая нижняя Telegram-клавиатура с `▶️ Старт` / `⏹️ Стоп` и `📋 Главное меню`.
+* Изменение списка прокси через Telegram.
+* Полная замена `proxies.json` только после успешной валидации всех строк.
+* Автоматический перезапуск активных браузерных сессий после замены прокси.
 * Мониторинг новых товаров на eBay.
 * Отправка новых товаров всем авторизованным пользователям.
+* Уведомления с названием, ссылкой и ценой товара.
+* Fallback-уведомления, если название или цена не найдены.
 * Поддержка HTTP-прокси.
 * Поддержка sticky residential proxy-сессий.
 * Прогрев eBay-сессии через главную страницу перед поисковой страницей.
 * Debug-скриншоты и HTML-фрагменты при проблемах с загрузкой страницы.
 * TTL для `known_items.json`.
 * Остановка мониторинга при признаках лимита или ошибки прокси.
-* Ручной запуск мониторинга через кнопку `Старт`.
 
 ## Стек
 
@@ -39,7 +47,7 @@ eBay Parser/
 ├── browser_manager.py      # Мониторинг ссылок через Playwright
 ├── config.py               # Настройки проекта из .env
 ├── telegram_utils.py       # Отправка Telegram-уведомлений
-├── utils.py                # JSON, прокси, ссылки, known_items
+├── utils.py                # JSON, прокси, ссылки, known_items, парсинг товаров
 ├── requirements.txt        # Python-зависимости
 ├── README.md               # Документация
 ├── .env.example            # Пример переменных окружения
@@ -182,9 +190,11 @@ nano .env
 TELEGRAM_TOKEN=your_telegram_bot_token
 ACCESS_KEY=your_access_key
 AUTHORIZED_USERS_FILE=authorized.json
+
 LINKS_FILE=links.json
 KNOWN_ITEMS_FILE=known_items.json
 PROXIES_FILE=proxies.json
+
 USE_PROXIES=True
 BROWSER_HEADLESS=False
 CHECK_INTERVAL=90
@@ -208,6 +218,12 @@ CONTAINER_SELECTOR="#srp-river-results > ul"
 DEFAULT_EBAY_URL=https://by.ebay.com
 CHECK_INTERVAL=90
 LINKS_LIMIT=20
+
+# Item parsing
+ITEM_CARD_SELECTOR="li.s-card, li.s-item"
+ITEM_LINK_SELECTOR="a.s-card__link[href*='/itm/'], a[href*='/itm/']"
+ITEM_TITLE_SELECTOR=".s-card__title .su-styled-text.primary.default, .s-card__title, .s-item__title"
+ITEM_PRICE_SELECTOR=".s-card__price, .s-item__price"
 
 # Browser navigation
 PAGE_NAVIGATION_TIMEOUT_MS=90000
@@ -308,6 +324,39 @@ USE_PROXIES=True
 ]
 ```
 
+### Изменение прокси через Telegram
+
+Основной способ менять прокси — через кнопку в главном меню:
+
+```text
+🔁 Изменить список прокси
+```
+
+Сценарий:
+
+1. Нажать `🔁 Изменить список прокси`.
+2. Бот попросит прислать новый список.
+3. Отправить список строками в формате:
+
+```text
+geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSIONID_lifetime-30m
+geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSIONID_lifetime-30m
+```
+
+4. Если все строки валидны, бот полностью заменит `proxies.json`.
+5. Если хотя бы одна строка невалидна, бот отклонит весь список и старый `proxies.json` останется без изменений.
+6. Если мониторинг был активен, активные браузерные сессии будут закрыты и пересозданы с новым списком прокси.
+7. Если мониторинг был остановлен, новый список просто сохранится. Для запуска нужно нажать `▶️ Старт`.
+
+Кнопка `❌ Отмена` в сценарии изменения прокси:
+
+* отменяет ввод нового списка;
+* очищает FSM-состояние;
+* возвращает в главное меню;
+* не меняет `proxies.json`.
+
+Пустой список прокси запрещён. Если пользователь отправит пустое сообщение или только пробелы, бот покажет ошибку и оставит старый файл без изменений.
+
 ### IPRoyal sticky residential proxy
 
 Для IPRoyal строка из панели может выглядеть так:
@@ -316,7 +365,7 @@ USE_PROXIES=True
 geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSIONID_lifetime-30m
 ```
 
-В `proxies.json` её нужно разложить так:
+В `proxies.json` она сохраняется так:
 
 ```json
 [
@@ -336,48 +385,24 @@ session-SESSIONID   # sticky-сессия
 lifetime-30m        # срок жизни сессии 30 минут
 ```
 
-### Конвертация списка IPRoyal в `proxies.json`
+### Ручное заполнение `proxies.json`
 
-Создать файл:
-
-```bash
-nano iproyal_list.txt
-```
-
-Вставить туда строки из IPRoyal в формате:
-
-```text
-geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSION1_lifetime-30m
-geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSION2_lifetime-30m
-```
-
-Запустить конвертер:
+Можно заполнить `proxies.json` вручную:
 
 ```bash
-python - <<'PY'
-import json
+nano proxies.json
+```
 
-items = []
+Пример:
 
-with open("iproyal_list.txt", "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-
-        host, port, username, password = line.split(":", 3)
-
-        items.append({
-            "server": f"http://{host}:{port}",
-            "username": username,
-            "password": password,
-        })
-
-with open("proxies.json", "w", encoding="utf-8") as f:
-    json.dump(items, f, ensure_ascii=False, indent=2)
-
-print(f"Saved {len(items)} proxies to proxies.json")
-PY
+```json
+[
+  {
+    "server": "http://geo.iproyal.com:12321",
+    "username": "PROXY_USERNAME",
+    "password": "PROXY_PASSWORD_country-us_session-SESSIONID_lifetime-30m"
+  }
+]
 ```
 
 Проверить JSON:
@@ -385,6 +410,8 @@ PY
 ```bash
 python -m json.tool proxies.json
 ```
+
+Если бот уже работает, после ручной правки файла лучше перезапустить сервис или заменить прокси через Telegram, чтобы активные браузеры точно пересоздались.
 
 ### Проверка прокси через Playwright
 
@@ -437,14 +464,17 @@ python -m py_compile bot.py browser_manager.py telegram_utils.py utils.py config
 python bot.py
 ```
 
+После запуска процесса мониторинг не стартует сам. Бот только начинает отвечать в Telegram. Чтобы включить поиск, нужно нажать `▶️ Старт`.
+
 В Telegram:
 
 1. Написать боту `/start`.
-2. Ввести ключ из `ACCESS_KEY`.
-3. Нажать `Добавить`.
-4. Ввести название ссылки.
-5. Отправить eBay search URL.
-6. Дождаться первого обхода.
+2. Ввести ключ из `ACCESS_KEY`, если пользователь ещё не авторизован.
+3. Открыть главное меню.
+4. Добавить одну или несколько eBay-ссылок.
+5. При необходимости заменить список прокси.
+6. Нажать `▶️ Старт`.
+7. Дождаться первого обхода.
 
 ## Как использовать бота
 
@@ -470,12 +500,58 @@ ACCESS_KEY=your_access_key
 authorized.json
 ```
 
+После авторизации бот показывает:
+
+* нижнюю обычную клавиатуру;
+* inline-меню.
+
+### Нижняя Telegram-клавиатура
+
+У авторизованного пользователя снизу отображается обычная Telegram-клавиатура:
+
+```text
+▶️ Старт
+📋 Главное меню
+```
+
+или:
+
+```text
+⏹️ Стоп
+📋 Главное меню
+```
+
+Состояние кнопки зависит от текущего состояния мониторинга:
+
+* если поиск остановлен — показывается `▶️ Старт`;
+* если поиск активен — показывается `⏹️ Стоп`.
+
+Кнопка `📋 Главное меню` показывает inline-меню и сбрасывает текущий FSM-сценарий.
+
+### Главное меню
+
+Главное inline-меню содержит основные действия:
+
+```text
+➕ Добавить
+🗑️ Удалить
+📋 Список
+🧹 Очистить всё
+🔁 Изменить список прокси
+▶️ Старт / ⏹️ Стоп
+```
+
+Кнопка `▶️ Старт / ⏹️ Стоп` в inline-меню также динамическая:
+
+* если мониторинг остановлен — `▶️ Старт`;
+* если мониторинг активен — `⏹️ Стоп`.
+
 ### Добавление ссылки
 
 В меню нажать:
 
 ```text
-Добавить
+➕ Добавить
 ```
 
 Порядок:
@@ -496,7 +572,7 @@ https://www.ebay.com/sch/i.html?_nkw=lot&_sop=10
 Кнопка:
 
 ```text
-Список
+📋 Список
 ```
 
 Показывает все ссылки из `links.json`.
@@ -506,7 +582,7 @@ https://www.ebay.com/sch/i.html?_nkw=lot&_sop=10
 Кнопка:
 
 ```text
-Удалить
+🗑️ Удалить
 ```
 
 Бот покажет список ссылок. Нужно выбрать ссылку для удаления.
@@ -516,20 +592,60 @@ https://www.ebay.com/sch/i.html?_nkw=lot&_sop=10
 Кнопка:
 
 ```text
-Очистить всё
+🧹 Очистить всё
 ```
 
 Полностью очищает `links.json`.
 
-### Ручной запуск
+### Запуск мониторинга
 
 Кнопка:
 
 ```text
-Старт
+▶️ Старт
 ```
 
-Используется после остановки мониторинга из-за лимита или ошибки прокси.
+Запускает мониторинг всех ссылок из `links.json`.
+
+Если мониторинг уже активен, бот сообщит, что поиск уже запущен.
+
+При запуске:
+
+1. Бот читает `links.json`.
+2. Для каждой ссылки создаёт отдельную задачу мониторинга.
+3. Для каждой активной ссылки создаётся отдельный браузерный запуск.
+4. Прокси выбирается из `proxies.json`, если `USE_PROXIES=True`.
+
+### Остановка мониторинга
+
+Кнопка:
+
+```text
+⏹️ Стоп
+```
+
+Останавливает мониторинг:
+
+1. Отменяет активные задачи мониторинга.
+2. Закрывает активные браузерные сессии.
+3. Переводит бот в состояние ожидания ручного запуска.
+
+После остановки можно снова нажать `▶️ Старт`.
+
+### Остановка при лимите прокси
+
+Если бот обнаружит признаки лимита, ошибки оплаты или проблемы прокси, он:
+
+1. Остановит мониторинг.
+2. Закроет активные сессии.
+3. Отправит уведомление пользователям.
+4. Будет ждать ручного запуска.
+
+После пополнения или замены прокси нужно нажать:
+
+```text
+▶️ Старт
+```
 
 ## Первый запуск ссылки
 
@@ -541,10 +657,63 @@ https://www.ebay.com/sch/i.html?_nkw=lot&_sop=10
 2. Прогревает сессию через главную страницу.
 3. Открывает поисковую страницу.
 4. Собирает текущие товары.
-5. Сохраняет их в `known_items.json`.
+5. Сохраняет URL товаров в `known_items.json`.
 6. Помечает ссылку как `parsed`.
 
 Уведомления начнут приходить только по новым товарам, которых ещё нет в `known_items.json`.
+
+## Формат уведомлений
+
+Бот отправляет один новый товар одним Telegram-сообщением.
+
+Формат:
+
+```html
+<b><i><a href="URL">Название</a></i></b>
+<i><u>Цена</u></i>
+```
+
+В Telegram это выглядит как:
+
+* название товара — жирный курсив и ссылка;
+* цена — курсив и подчёркивание.
+
+Если название не найдено, бот отправляет ссылку и fallback:
+
+```html
+<a href="URL">URL</a>
+<b><i>Название не найдено</i></b>
+<i><u>Цена</u></i>
+```
+
+Если цена не найдена:
+
+```html
+<b><i><a href="URL">Название</a></i></b>
+<i><u>Цена не найдена</u></i>
+```
+
+Если eBay поменяет структуру карточек, бот использует fallback-режим по ссылкам. В этом случае товар не теряется, но название и цена могут прийти как fallback.
+
+## Настройка селекторов товаров
+
+Селекторы вынесены в `.env`:
+
+```env
+ITEM_CARD_SELECTOR="li.s-card, li.s-item"
+ITEM_LINK_SELECTOR="a.s-card__link[href*='/itm/'], a[href*='/itm/']"
+ITEM_TITLE_SELECTOR=".s-card__title .su-styled-text.primary.default, .s-card__title, .s-item__title"
+ITEM_PRICE_SELECTOR=".s-card__price, .s-item__price"
+```
+
+Назначение:
+
+* `ITEM_CARD_SELECTOR` — карточка товара внутри контейнера выдачи.
+* `ITEM_LINK_SELECTOR` — ссылка на товар.
+* `ITEM_TITLE_SELECTOR` — название товара.
+* `ITEM_PRICE_SELECTOR` — цена товара.
+
+Если eBay поменяет DOM, нужно обновить эти селекторы в `.env` и перезапустить бота.
 
 ## Проверка уведомлений
 
@@ -575,10 +744,16 @@ print("Removed:", key)
 PY
 ```
 
-Запустить бота:
+Запустить бота, если он ещё не запущен:
 
 ```bash
 python bot.py
+```
+
+В Telegram нажать:
+
+```text
+▶️ Старт
 ```
 
 Если этот товар всё ещё есть на странице, бот должен отправить его как новый.
@@ -648,7 +823,7 @@ cd /opt/ebay-parser
 git clone YOUR_REPOSITORY_URL .
 ```
 
-Или загрузить файлы вручную через `scp`/SFTP.
+Или загрузить файлы вручную через `scp`/SFTP`.
 
 ### 6. Создать venv на сервере
 
@@ -694,6 +869,12 @@ LINKS_FILE=/opt/ebay-parser/links.json
 KNOWN_ITEMS_FILE=/opt/ebay-parser/known_items.json
 PROXIES_FILE=/opt/ebay-parser/proxies.json
 
+CONTAINER_SELECTOR="#srp-river-results > ul"
+ITEM_CARD_SELECTOR="li.s-card, li.s-item"
+ITEM_LINK_SELECTOR="a.s-card__link[href*='/itm/'], a[href*='/itm/']"
+ITEM_TITLE_SELECTOR=".s-card__title .su-styled-text.primary.default, .s-card__title, .s-item__title"
+ITEM_PRICE_SELECTOR=".s-card__price, .s-item__price"
+
 USE_PROXIES=True
 BROWSER_HEADLESS=False
 CHECK_INTERVAL=90
@@ -709,6 +890,14 @@ printf "[]\n" > proxies.json
 ```
 
 ### 11. Заполнить `proxies.json`
+
+Рекомендуемый способ — через Telegram-кнопку:
+
+```text
+🔁 Изменить список прокси
+```
+
+Можно заполнить вручную:
 
 ```bash
 nano proxies.json
@@ -741,6 +930,8 @@ xvfb-run -a .venv/bin/python bot.py
 ```
 
 Если бот запускается и в Telegram отвечает, можно настраивать systemd.
+
+После запуска вручную мониторинг не стартует автоматически. Нужно нажать `▶️ Старт` в Telegram.
 
 ## Systemd service
 
@@ -790,17 +981,19 @@ systemctl status ebay-parser-bot
 journalctl -u ebay-parser-bot -f
 ```
 
-Остановить:
+Остановить сервис:
 
 ```bash
 systemctl stop ebay-parser-bot
 ```
 
-Перезапустить:
+Перезапустить сервис:
 
 ```bash
 systemctl restart ebay-parser-bot
 ```
+
+После перезапуска сервиса поиск снова будет остановлен. Для запуска нужно нажать `▶️ Старт` в Telegram.
 
 ## Headless и Xvfb
 
@@ -877,7 +1070,7 @@ Und Lot for sale | eBay
 Что делать:
 
 1. Проверить прокси через обычный Chrome.
-2. Оставить одну рабочую sticky-сессию в `proxies.json`.
+2. Заменить список прокси через Telegram-кнопку `🔁 Изменить список прокси`.
 3. Поставить `BROWSER_HEADLESS=False`.
 4. Запускать на сервере через Xvfb.
 5. Временно поставить:
@@ -915,6 +1108,40 @@ CHECK_INTERVAL=180
 ```
 
 `server` должен содержать `http://`.
+
+Если прокси меняются через Telegram, отправляй строки в формате:
+
+```text
+geo.iproyal.com:12321:USERNAME:PASSWORD_country-us_session-SESSIONID_lifetime-30m
+```
+
+Бот сам преобразует их в формат `proxies.json`.
+
+### Не приходит название или цена
+
+Возможные причины:
+
+* eBay изменил классы карточек;
+* страница открылась в другом layout;
+* часть карточки не прогрузилась;
+* eBay отдал рекламную или нестандартную карточку.
+
+Что делать:
+
+1. Проверить debug HTML.
+2. Обновить селекторы в `.env`:
+
+```env
+ITEM_CARD_SELECTOR=
+ITEM_LINK_SELECTOR=
+ITEM_TITLE_SELECTOR=
+ITEM_PRICE_SELECTOR=
+```
+
+3. Перезапустить бота.
+4. Нажать `▶️ Старт`.
+
+Если карточки не распарсились, бот использует fallback по ссылкам. В этом случае товар всё равно может прийти, но с `Название не найдено` и `Цена не найдена`.
 
 ### `chat not found`
 
@@ -957,7 +1184,8 @@ PY
 * существует ли `proxies.json`;
 * правильно ли указан `PROXIES_FILE` в `.env`;
 * запускаешь ли бот из корня проекта;
-* валидный ли JSON.
+* валидный ли JSON;
+* не пустой ли список прокси.
 
 ### Бот на сервере не открывает браузер
 
@@ -969,11 +1197,28 @@ xvfb-run -a .venv/bin/python bot.py
 
 Для systemd `ExecStart` должен тоже использовать `xvfb-run`.
 
+### После перезапуска сервиса поиск не идёт
+
+Это ожидаемое поведение.
+
+После запуска или перезапуска процесса бот находится в состоянии ожидания. Нужно открыть Telegram и нажать:
+
+```text
+▶️ Старт
+```
+
 ## Обслуживание
 
 ### Сменить sticky session
 
-В `proxies.json` изменить часть:
+Рекомендуемый способ:
+
+1. Открыть Telegram.
+2. Нажать `🔁 Изменить список прокси`.
+3. Отправить новый список IPRoyal-строк.
+4. Если поиск был активен, бот сам пересоздаст браузеры с новыми прокси.
+
+Можно вручную изменить в `proxies.json` часть:
 
 ```text
 _session-XXXXXXXX
@@ -991,25 +1236,20 @@ _session-YzJ8Il52
 _session-Ab12Cd34
 ```
 
-После изменения перезапустить бота:
+После ручной правки перезапустить бота:
 
 ```bash
 systemctl restart ebay-parser-bot
 ```
 
-или локально:
-
-```bash
-Ctrl+C
-python bot.py
-```
+и нажать `▶️ Старт` в Telegram.
 
 ### Очистить список ссылок
 
 Через Telegram:
 
 ```text
-Очистить всё
+🧹 Очистить всё
 ```
 
 Или вручную:
@@ -1054,11 +1294,18 @@ printf "{}\n" > known_items.json
 printf "[]\n" > proxies.json
 
 nano .env
-nano proxies.json
 
 python -m py_compile bot.py browser_manager.py telegram_utils.py utils.py config.py
 python bot.py
 ```
+
+После запуска:
+
+1. Написать боту `/start`.
+2. Авторизоваться ключом.
+3. При необходимости нажать `🔁 Изменить список прокси`.
+4. Добавить ссылки.
+5. Нажать `▶️ Старт`.
 
 ## Быстрый серверный запуск с нуля
 
@@ -1086,11 +1333,19 @@ printf "{}\n" > known_items.json
 printf "[]\n" > proxies.json
 
 nano .env
-nano proxies.json
 
 python -m py_compile bot.py browser_manager.py telegram_utils.py utils.py config.py
 xvfb-run -a .venv/bin/python bot.py
 ```
+
+После запуска на сервере:
+
+1. Открыть Telegram.
+2. Написать `/start`.
+3. Авторизоваться.
+4. Добавить ссылки.
+5. Заменить прокси через Telegram.
+6. Нажать `▶️ Старт`.
 
 ## Минимальный `.gitignore`
 

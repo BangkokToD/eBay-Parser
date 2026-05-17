@@ -15,11 +15,11 @@ from utils import (
     get_random_proxy,
     check_if_link_parsed,
     mark_link_as_parsed,
-    extract_links,
+    extract_items,
     update_known_items_seen,
     prune_known_items,
 )
-from telegram_utils import notify_users_all, notify_users_photo_all
+from telegram_utils import notify_item_all, notify_users_all, notify_users_photo_all
 from config import (
     BLOCKED_PAGE_PATTERNS,
     BLOCKED_PAGE_SLEEP_SECONDS,
@@ -451,14 +451,16 @@ async def check_proxy_limit_or_stop(response: Any, page, name: str) -> bool:
     return True
 
 
-async def persist_seen_links(raw_links: set[str], notify_new: bool) -> None:
-    """Сохраняет найденные ссылки и отправляет уведомления по новым товарам.
+async def persist_seen_items(items: list[dict], notify_new: bool) -> None:
+    """Сохраняет найденные товары и отправляет уведомления по новым URL.
 
     Args:
-        raw_links: Ссылки, полученные со страницы.
-        notify_new: Нужно ли отправлять уведомления по новым ссылкам.
+        items: Товары, полученные со страницы.
+        notify_new: Нужно ли отправлять уведомления по новым товарам.
     """
     global last_known_items_cleanup_ts
+
+    raw_links = {item["url"] for item in items if item.get("url")}
 
     async with known_items_lock:
         new_links = update_known_items_seen(known_items, raw_links)
@@ -478,8 +480,14 @@ async def persist_seen_links(raw_links: set[str], notify_new: bool) -> None:
         save_known_items(known_items)
 
     if notify_new:
-        for link in sorted(new_links):
-            await notify_users_all(link)
+        sent_links = set()
+        for item in items:
+            item_url = item.get("url")
+            if not item_url or item_url not in new_links or item_url in sent_links:
+                continue
+
+            await notify_item_all(item)
+            sent_links.add(item_url)
 
 
 def should_restart_browser(session_started_at: float) -> bool:
@@ -657,15 +665,15 @@ async def monitor_page(name, url):
                     )
                     continue
 
-                raw_links = await extract_links(page, CONTAINER_SELECTOR, limit=LINKS_LIMIT)
+                items = await extract_items(page, CONTAINER_SELECTOR, limit=LINKS_LIMIT)
 
                 if first_run:
-                    print(f"[INFO] ({name}) Первый запуск — ссылки сохраняются, но не отправляются")
-                    await persist_seen_links(raw_links, notify_new=False)
+                    print(f"[INFO] ({name}) Первый запуск — товары сохраняются, но не отправляются")
+                    await persist_seen_items(items, notify_new=False)
                     mark_link_as_parsed(name)
                     first_run = False
                 else:
-                    await persist_seen_links(raw_links, notify_new=True)
+                    await persist_seen_items(items, notify_new=True)
 
                 # 🔁 Повторная проверка
                 while True:
@@ -686,8 +694,8 @@ async def monitor_page(name, url):
                             return
 
                         await page.wait_for_selector(CONTAINER_SELECTOR, timeout=15000)
-                        raw_links = await extract_links(page, CONTAINER_SELECTOR, limit=LINKS_LIMIT)
-                        await persist_seen_links(raw_links, notify_new=True)
+                        items = await extract_items(page, CONTAINER_SELECTOR, limit=LINKS_LIMIT)
+                        await persist_seen_items(items, notify_new=True)
                         await asyncio.sleep(CHECK_INTERVAL)
                     except PlaywrightTimeout:
                         if not await check_proxy_limit_or_stop(None, page, name):

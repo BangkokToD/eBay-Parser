@@ -9,7 +9,9 @@ from config import (
     LINKS_FILE, KNOWN_ITEMS_FILE,
     AUTHORIZED_USERS_FILE,
     REFERERS, ACCEPT_LANGUAGES, USE_PROXIES,
-    PROXIES_FILE, KNOWN_ITEMS_TTL_DAYS
+    PROXIES_FILE, KNOWN_ITEMS_TTL_DAYS,
+    ITEM_CARD_SELECTOR, ITEM_LINK_SELECTOR,
+    ITEM_TITLE_SELECTOR, ITEM_PRICE_SELECTOR,
 )
 
 
@@ -419,6 +421,160 @@ def is_ebay_item_url(url: str) -> bool:
         return False
 
     return "ebay.com" in parsed.netloc and "/itm/" in parsed.path
+
+
+
+def split_css_selectors(selector: str) -> list[str]:
+    """Разделяет строку CSS-селекторов на отдельные кандидаты.
+
+    Args:
+        selector: CSS-селектор или список селекторов через запятую.
+
+    Returns:
+        Список непустых CSS-селекторов.
+    """
+    return [item.strip() for item in selector.split(",") if item.strip()]
+
+
+def clean_item_text(value: str | None) -> str | None:
+    """Нормализует текстовое значение товара.
+
+    Args:
+        value: Сырой текст из DOM или ``None``.
+
+    Returns:
+        Текст без лишних пробелов или ``None``, если полезного текста нет.
+    """
+    if value is None:
+        return None
+
+    cleaned = " ".join(value.split())
+    return cleaned or None
+
+
+async def query_first_element(root, selector: str):
+    """Возвращает первый найденный элемент по списку CSS-селекторов.
+
+    Args:
+        root: Playwright locator/root element.
+        selector: CSS-селектор или список селекторов через запятую.
+
+    Returns:
+        Элемент Playwright или ``None``.
+    """
+    for selector_candidate in split_css_selectors(selector):
+        element = await root.query_selector(selector_candidate)
+        if element:
+            return element
+
+    return None
+
+
+async def extract_element_text(root, selector: str) -> str | None:
+    """Извлекает текст первого подходящего элемента.
+
+    Args:
+        root: Playwright locator/root element.
+        selector: CSS-селектор или список селекторов через запятую.
+
+    Returns:
+        Нормализованный текст или ``None``.
+    """
+    element = await query_first_element(root, selector)
+    if not element:
+        return None
+
+    text = await element.inner_text()
+    return clean_item_text(text)
+
+
+async def extract_fallback_items_from_links(page, selector, limit=None) -> list[dict]:
+    """Извлекает товары fallback-режимом только по ссылкам.
+
+    Используется, если карточные селекторы eBay изменились и полноценный
+    парсинг карточек не вернул ни одного товара. Такой fallback сохраняет
+    базовую логику known_items и не даёт боту потерять текущие URL.
+
+    Args:
+        page: Страница Playwright.
+        selector: CSS-селектор контейнера выдачи.
+        limit: Максимальное количество товаров.
+
+    Returns:
+        Список товаров с ``url`` и пустыми ``title``/``price``.
+    """
+    raw_links = await extract_links(page, selector, limit=limit)
+    items = []
+
+    for link in raw_links:
+        items.append({
+            "url": link,
+            "title": None,
+            "price": None,
+        })
+
+    return items
+
+
+async def extract_items(page, selector, limit=None):
+    """Извлекает товары eBay из контейнера выдачи.
+
+    Args:
+        page: Страница Playwright.
+        selector: CSS-селектор контейнера выдачи.
+        limit: Максимальное количество товаров.
+
+    Returns:
+        Список словарей с ключами ``url``, ``title`` и ``price``.
+    """
+    try:
+        container = await page.query_selector(selector)
+        if not container:
+            return []
+
+        card_selector = ITEM_CARD_SELECTOR or "li.s-card, li.s-item"
+        cards = await container.query_selector_all(card_selector)
+        items = []
+        seen_urls = set()
+
+        for card in cards:
+            link_element = await query_first_element(card, ITEM_LINK_SELECTOR)
+            if not link_element:
+                continue
+
+            raw_url = await link_element.get_attribute("href")
+            if not raw_url:
+                continue
+
+            normalized_url = normalize_url(raw_url)
+            if not is_ebay_item_url(normalized_url) or normalized_url in seen_urls:
+                continue
+
+            title = await extract_element_text(card, ITEM_TITLE_SELECTOR)
+            if not title:
+                title = clean_item_text(await link_element.inner_text())
+
+            price = await extract_element_text(card, ITEM_PRICE_SELECTOR)
+
+            items.append({
+                "url": normalized_url,
+                "title": title,
+                "price": price,
+            })
+            seen_urls.add(normalized_url)
+
+            if limit and len(items) >= limit:
+                break
+
+        if items:
+            return items
+
+        print("[WARNING] extract_items: карточки не найдены, используем fallback по ссылкам")
+        return await extract_fallback_items_from_links(page, selector, limit=limit)
+
+    except Exception as e:
+        print("[ERROR] extract_items:", e)
+        return []
 
 
 async def extract_links(page, selector, limit=None):

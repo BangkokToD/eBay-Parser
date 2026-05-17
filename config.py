@@ -117,6 +117,16 @@ CONTAINER_SELECTOR = get_env_str("CONTAINER_SELECTOR", "#srp-river-results > ul"
 DEFAULT_EBAY_URL = get_env_str("DEFAULT_EBAY_URL", "https://by.ebay.com")
 CHECK_INTERVAL = get_env_int("CHECK_INTERVAL", 90)
 LINKS_LIMIT = get_env_int("LINKS_LIMIT", 20)
+ITEM_CARD_SELECTOR = get_env_str("ITEM_CARD_SELECTOR", "li.s-card, li.s-item")
+ITEM_LINK_SELECTOR = get_env_str(
+    "ITEM_LINK_SELECTOR",
+    "a.s-card__link[href*='/itm/'], a[href*='/itm/']",
+)
+ITEM_TITLE_SELECTOR = get_env_str(
+    "ITEM_TITLE_SELECTOR",
+    ".s-card__title .su-styled-text.primary.default, .s-card__title, .s-item__title",
+)
+ITEM_PRICE_SELECTOR = get_env_str("ITEM_PRICE_SELECTOR", ".s-card__price, .s-item__price")
 
 # === Навигация браузера ===
 PAGE_NAVIGATION_TIMEOUT_MS = get_env_int("PAGE_NAVIGATION_TIMEOUT_MS", 90000)
